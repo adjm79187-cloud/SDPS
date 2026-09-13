@@ -1,6 +1,6 @@
 
 from datetime import datetime
-import os, secrets, io, csv, shutil, uuid, urllib.request
+import os, secrets, io, csv, shutil, uuid, urllib.request, json
 from datetime import datetime
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, session, flash, abort, send_file
@@ -88,20 +88,48 @@ def csrf_ok():
     return request.form.get("_csrf")==session.get("_csrf")
 def asset_url(name):
     if not name: return ""
-    return name if str(name).startswith(('http://','https://')) else url_for('static',filename='uploads/'+str(name))
+    name=str(name)
+    if name.startswith(('http://','https://')): return name
+    if '/' in name and name.split('/',1)[0] in ('student-photos','school-assets','gallery'):
+        bucket,obj=name.split('/',1)
+        return url_for('media',bucket=bucket,object_path=obj)
+    return url_for('static',filename='uploads/'+name)
+
 def upload(field):
     f=request.files.get(field)
     if not f or not f.filename: return ""
     ext=f.filename.rsplit('.',1)[-1].lower() if '.' in f.filename else ''
     if ext not in ALLOWED: raise ValueError("केवल JPG/PNG/WEBP/GIF image allowed है")
-    data=f.read(); fn=secrets.token_hex(16)+'.'+ext
-    url=os.environ.get('SUPABASE_URL'); key=os.environ.get('SUPABASE_SERVICE_ROLE_KEY') or os.environ.get('SUPABASE_SECRET_KEY'); bucket=os.environ.get('SUPABASE_STORAGE_BUCKET','sports-uploads')
-    if url and key:
-        endpoint=f"{url.rstrip('/')}/storage/v1/object/{bucket}/{fn}"
-        req=urllib.request.Request(endpoint,data=data,method='POST',headers={'Authorization':f'Bearer {key}','apikey':key,'Content-Type':f.mimetype or 'application/octet-stream','x-upsert':'true'})
-        urllib.request.urlopen(req,timeout=30).read()
-        return f"{url.rstrip('/')}/storage/v1/object/public/{bucket}/{fn}"
-    os.makedirs(UPLOAD,exist_ok=True); open(os.path.join(UPLOAD,fn),'wb').write(data); return fn
+    data=f.read()
+    if len(data) > 8*1024*1024: raise ValueError("Image 8 MB से छोटी होनी चाहिए")
+    fn=secrets.token_hex(16)+'.'+ext
+    if field == 'school_logo' or field.startswith('house_logo_'):
+        bucket='school-assets'
+    elif field == 'gallery_photo':
+        bucket='gallery'
+    else:
+        bucket='student-photos'
+    url=os.environ.get('SUPABASE_URL'); key=os.environ.get('SUPABASE_SERVICE_ROLE_KEY') or os.environ.get('SUPABASE_SECRET_KEY')
+    if not url or not key: raise RuntimeError('SUPABASE_URL और SUPABASE_SERVICE_ROLE_KEY आवश्यक हैं')
+    endpoint=f"{url.rstrip('/')}/storage/v1/object/{bucket}/{fn}"
+    req=urllib.request.Request(endpoint,data=data,method='POST',headers={'Authorization':f'Bearer {key}','apikey':key,'Content-Type':f.mimetype or 'application/octet-stream','x-upsert':'true'})
+    urllib.request.urlopen(req,timeout=30).read()
+    return f"{bucket}/{fn}"
+
+@app.route('/media/<bucket>/<path:object_path>')
+@role_required('owner','sports_teacher','house_teacher','prefect','student')
+def media(bucket, object_path):
+    if bucket not in ('student-photos','school-assets','gallery'): abort(404)
+    url=os.environ.get('SUPABASE_URL'); key=os.environ.get('SUPABASE_SERVICE_ROLE_KEY') or os.environ.get('SUPABASE_SECRET_KEY')
+    if not url or not key: abort(503)
+    endpoint=f"{url.rstrip('/')}/storage/v1/object/{bucket}/{object_path}"
+    req=urllib.request.Request(endpoint,headers={'Authorization':f'Bearer {key}','apikey':key})
+    try:
+        resp=urllib.request.urlopen(req,timeout=30)
+        data=resp.read(); ctype=resp.headers.get_content_type() or 'application/octet-stream'
+        return send_file(io.BytesIO(data),mimetype=ctype,download_name=os.path.basename(object_path))
+    except Exception:
+        abort(404)
 
 def calc_bmi(h,w):
     try:
@@ -118,27 +146,16 @@ def common():
 @app.route('/students/<int:sid>/photo', methods=['POST'])
 @role_required('owner','sports_teacher','house_teacher','prefect')
 def student_photo(sid):
-    c = {"role": session.get("role"), "teacher_house": teacher_house()}
-    st = db().execute("SELECT * FROM students WHERE id=?", (sid,)).fetchone()
-    if not st:
-        abort(404)
-    if not house_allowed(c, st['house']):
-        abort(403)
-    f = request.files.get('photo')
-    if not f or not f.filename:
-        flash('Please select a photo.')
-        return redirect(request.referrer or url_for('students'))
-    if not f.filename.rsplit(".",1)[-1].lower() in ALLOWED:
-        flash('Invalid image type.')
-        return redirect(request.referrer or url_for('students'))
-    ext = os.path.splitext(secure_filename(f.filename))[1].lower()
-    name = f"student_{sid}_{uuid.uuid4().hex}{ext}"
-    path = os.path.join(UPLOAD, name)
-    f.save(path)
-    db().execute("UPDATE students SET photo=? WHERE id=?", (name, sid))
-    db().commit()
-    log('student_photo', f'Updated profile photo for student {sid}')
-    flash('Student profile photo updated.')
+    c = db(); st = c.execute("SELECT * FROM students WHERE id=?", (sid,)).fetchone()
+    if not st: c.close(); abort(404)
+    if session.get('role') == 'house_teacher' and not house_allowed(c, st['house']): c.close(); abort(403)
+    try:
+        ph=upload('photo')
+        if not ph: raise ValueError('Photo select करें')
+        c.execute("UPDATE students SET photo=? WHERE id=?", (ph, sid)); c.commit(); c.close()
+        log(f'Updated profile photo for student {sid}'); flash('Student profile photo updated.','ok')
+    except Exception as e:
+        c.rollback(); c.close(); flash('Photo upload failed: '+str(e),'error')
     return redirect(request.referrer or url_for('students'))
 
 @app.route("/")
@@ -198,8 +215,8 @@ def student_add():
         if not house_allowed(c,h): abort(403)
         try:
             ph=upload("photo")
-            c.execute("""INSERT INTO students(admission_no,name,class_name,section,roll_no,house,blood_group,dob,photo,height,weight,bmi,body_age,guardian,phone,address,remarks)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(request.form["admission_no"],request.form["name"],request.form["class_name"],request.form["section"],request.form["roll_no"],h,request.form["blood_group"],request.form["dob"],ph,float(request.form.get("height") or 0),float(request.form.get("weight") or 0),calc_bmi(request.form.get("height"),request.form.get("weight")),request.form["body_age"],request.form["guardian"],request.form["phone"],request.form["address"],request.form["remarks"]))
+            c.execute("""INSERT INTO students(admission_no,name,class_name,section,roll_no,house,house_position,blood_group,dob,photo,height,weight,bmi,body_age,guardian,phone,address,remarks)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(request.form["admission_no"],request.form["name"],request.form["class_name"],request.form["section"],request.form["roll_no"],h,request.form.get("house_position",""),request.form["blood_group"],request.form["dob"],ph,float(request.form.get("height") or 0),float(request.form.get("weight") or 0),calc_bmi(request.form.get("height"),request.form.get("weight")),request.form["body_age"],request.form["guardian"],request.form["phone"],request.form["address"],request.form["remarks"]))
             c.commit(); log("Added student"); flash("Student added","ok"); return redirect(url_for("students"))
         except Exception as e: c.rollback(); flash("Save failed: "+str(e),"error")
         finally: c.close()
@@ -217,8 +234,8 @@ def student_edit(sid):
         ph=s["photo"] or ""
         try: ph=upload("photo") or ph
         except Exception as e: flash(str(e),"error"); c.close(); return render_template("student_form.html",row=s)
-        c.execute("""UPDATE students SET admission_no=?,name=?,class_name=?,section=?,roll_no=?,house=?,blood_group=?,dob=?,photo=?,height=?,weight=?,bmi=?,body_age=?,guardian=?,phone=?,address=?,remarks=? WHERE id=?""",
-        (request.form["admission_no"],request.form["name"],request.form["class_name"],request.form["section"],request.form["roll_no"],request.form["house"],request.form["blood_group"],request.form["dob"],ph,float(request.form.get("height") or 0),float(request.form.get("weight") or 0),calc_bmi(request.form.get("height"),request.form.get("weight")),request.form["body_age"],request.form["guardian"],request.form["phone"],request.form["address"],request.form["remarks"],sid))
+        c.execute("""UPDATE students SET admission_no=?,name=?,class_name=?,section=?,roll_no=?,house=?,house_position=?,blood_group=?,dob=?,photo=?,height=?,weight=?,bmi=?,body_age=?,guardian=?,phone=?,address=?,remarks=? WHERE id=?""",
+        (request.form["admission_no"],request.form["name"],request.form["class_name"],request.form["section"],request.form["roll_no"],request.form["house"],request.form.get("house_position",""),request.form["blood_group"],request.form["dob"],ph,float(request.form.get("height") or 0),float(request.form.get("weight") or 0),calc_bmi(request.form.get("height"),request.form.get("weight")),request.form["body_age"],request.form["guardian"],request.form["phone"],request.form["address"],request.form["remarks"],sid))
         c.commit(); c.close(); log("Edited student"); flash("Student updated","ok"); return redirect(url_for("students"))
     c.close(); return render_template("student_form.html",row=s)
 
@@ -254,7 +271,7 @@ def teacher_disable(tid):
     c.close(); log("Disabled teacher"); return redirect(url_for("teachers"))
 
 @app.route("/owner-reset",methods=["GET","POST"])
-@role_required("owner")
+@role_required("owner","sports_teacher")
 def owner_reset():
     c=db()
     if request.method=="POST":
@@ -406,14 +423,14 @@ def app_settings():
     if request.method=="POST":
         if not csrf_ok(): abort(400)
         for k in ["school_name","school_address","principal_name","sports_teacher_name","house_1","house_2","house_3","house_4"]:
-            c.execute("INSERT OR REPLACE INTO settings(k,v) VALUES(?,?)",(k,request.form.get(k,"")))
+            c.execute("INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=EXCLUDED.v",(k,request.form.get(k,"")))
         try: logo=upload("school_logo")
         except: logo=""
-        if logo: c.execute("INSERT OR REPLACE INTO settings(k,v) VALUES('school_logo',?)",(logo,))
+        if logo: c.execute("INSERT INTO settings(k,v) VALUES('school_logo',?) ON CONFLICT(k) DO UPDATE SET v=EXCLUDED.v",(logo,))
         for i in range(1,5):
             try: fn=upload(f"house_logo_{i}")
             except: fn=""
-            if fn: c.execute("INSERT OR REPLACE INTO settings(k,v) VALUES(?,?)",(f"house_logo_{i}",fn))
+            if fn: c.execute("INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=EXCLUDED.v",(f"house_logo_{i}",fn))
         c.commit(); c.close(); log("Updated settings"); flash("Settings saved","ok"); return redirect(url_for("app_settings"))
     s={r["k"]:r["v"] for r in c.execute("SELECT k,v FROM settings")}; c.close(); return render_template("settings.html",s=s)
 
@@ -437,16 +454,16 @@ def gallery():
     if request.method=="POST":
         if not csrf_ok(): abort(400)
         house=request.form["house"]
-        if session["role"] in ("house_teacher","prefect") and not house_allowed(c,house): abort(403)
+        if session["role"] == "house_teacher" and not house_allowed(c,house): abort(403)
         try:
-            fn=upload("photo")
+            fn=upload("gallery_photo")
             if not fn: raise ValueError("Photo select करें")
             c.execute("INSERT INTO gallery(filename,caption,house,event_name,uploaded_by,created_at) VALUES(?,?,?,?,?,?)",
                       (fn,request.form["caption"],house,request.form["event_name"],session["user_id"],datetime.now().isoformat()))
             c.commit(); log("Uploaded gallery photo"); flash("Photo uploaded","ok")
         except Exception as e:
             c.rollback(); flash("Photo upload failed: "+str(e),"error")
-    if session["role"] in ("house_teacher","prefect"):
+    if session["role"] == "house_teacher":
         t=c.execute("SELECT house FROM teachers WHERE user_id=?",(session["uid"],)).fetchone()
         rows=c.execute("SELECT * FROM gallery WHERE house=? ORDER BY id DESC",(t["house"] if t else "",)).fetchall()
     else:
@@ -457,8 +474,15 @@ def gallery():
 @app.route("/backup")
 @role_required("owner","sports_teacher")
 def backup():
-    if not os.path.exists(DB): abort(404)
-    return send_file(DB,as_attachment=True,download_name="sports_backup.db",mimetype="application/octet-stream")
+    c=db()
+    tables=['users','teachers','students','events','results','participation','assessments','annual','certificates','gallery','reset_requests','audit','settings','houses','house_positions','games']
+    dump={}
+    for table in tables:
+        try: dump[table]=[dict(r) for r in c.execute(f'SELECT * FROM {table}').fetchall()]
+        except Exception: dump[table]=[]
+    c.close()
+    data=json.dumps(dump,ensure_ascii=False,default=str,indent=2).encode('utf-8')
+    return send_file(io.BytesIO(data),as_attachment=True,download_name='sports_department_backup.json',mimetype='application/json')
 
 if __name__=="__main__":
     app.run(host="0.0.0.0",port=int(os.environ.get("PORT",5000)),debug=False)
