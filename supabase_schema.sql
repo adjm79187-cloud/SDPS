@@ -1,0 +1,13 @@
+    "CREATE TABLE IF NOT EXISTS users(id BIGSERIAL PRIMARY KEY,user_id TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,role TEXT NOT NULL,active INTEGER DEFAULT 1,created_at TEXT)",
+    "CREATE TABLE IF NOT EXISTS teachers(id BIGSERIAL PRIMARY KEY,user_id BIGINT UNIQUE REFERENCES users(id) ON DELETE CASCADE,name TEXT,designation TEXT,house TEXT,photo TEXT)",
+    "CREATE TABLE IF NOT EXISTS students(id BIGSERIAL PRIMARY KEY,user_id BIGINT UNIQUE REFERENCES users(id) ON DELETE SET NULL,admission_no TEXT UNIQUE,name TEXT,class_name TEXT,section TEXT,roll_no TEXT,house TEXT,blood_group TEXT,dob TEXT,photo TEXT,height DOUBLE PRECISION,weight DOUBLE PRECISION,bmi DOUBLE PRECISION,body_age TEXT,guardian TEXT,phone TEXT,address TEXT,remarks TEXT,active INTEGER DEFAULT 1)",
+    "CREATE TABLE IF NOT EXISTS events(id BIGSERIAL PRIMARY KEY,name TEXT,category TEXT,game TEXT,event_date TEXT,house1 TEXT,house2 TEXT,venue TEXT,description TEXT)",
+    "CREATE TABLE IF NOT EXISTS results(id BIGSERIAL PRIMARY KEY,event_id BIGINT REFERENCES events(id) ON DELETE CASCADE,house TEXT,position TEXT,points DOUBLE PRECISION,remarks TEXT)",
+    "CREATE TABLE IF NOT EXISTS participation(id BIGSERIAL PRIMARY KEY,event_id BIGINT REFERENCES events(id) ON DELETE CASCADE,student_id BIGINT REFERENCES students(id) ON DELETE CASCADE,performance TEXT,position TEXT,remarks TEXT)",
+    "CREATE TABLE IF NOT EXISTS assessments(id BIGSERIAL PRIMARY KEY,student_id BIGINT REFERENCES students(id) ON DELETE CASCADE,assess_date TEXT,fitness TEXT,running TEXT,strength TEXT,flexibility TEXT,endurance TEXT,discipline TEXT,participation TEXT,remarks TEXT)",
+    "CREATE TABLE IF NOT EXISTS annual(id BIGSERIAL PRIMARY KEY,name TEXT,category TEXT,event_date TEXT,house TEXT,position TEXT,points DOUBLE PRECISION,remarks TEXT)",
+    "CREATE TABLE IF NOT EXISTS certificates(id BIGSERIAL PRIMARY KEY,student_id BIGINT REFERENCES students(id) ON DELETE CASCADE,event_name TEXT,game TEXT,position TEXT,certificate_date TEXT,remarks TEXT)",
+    "CREATE TABLE IF NOT EXISTS gallery(id BIGSERIAL PRIMARY KEY,filename TEXT,caption TEXT,house TEXT,event_name TEXT,uploaded_by TEXT,created_at TEXT)",
+    "CREATE TABLE IF NOT EXISTS reset_requests(id BIGSERIAL PRIMARY KEY,user_id TEXT,requested_at TEXT,status TEXT DEFAULT 'pending')",
+    "CREATE TABLE IF NOT EXISTS audit(id BIGSERIAL PRIMARY KEY,user_id TEXT,action TEXT,created_at TEXT)",
+    "CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY,v TEXT)"] : c.execute(q)
