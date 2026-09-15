@@ -1,9 +1,0 @@
-{% extends "base.html" %}{% block content %}
-<div class="row"><h1>Common Photo Gallery</h1></div>
-<div class="card"><p><b>Owner और Sports Teacher:</b> सभी Houses की photos upload कर सकते हैं।</p><p><b>House Teacher / Prefect:</b> केवल अपने assigned House की photos upload और देख सकते हैं।</p>
-<form method="post" enctype="multipart/form-data"><input type="hidden" name="_csrf" value="{{session._csrf}}"><div class="formgrid">
-<label>House<select name="house">{% for h in HOUSES %}<option>{{h}}</option>{% endfor %}</select></label>
-<label>Event / Occasion<input name="event_name"></label><label>Caption<input name="caption"></label>
-<label>Photo<input type="file" name="photo" accept="image/*" required></label></div><button>Upload Photo</button></form></div>
-<div class="gallery">{% for r in rows %}<div class="gallery-card"><img src="{{asset_url(r.filename)}}"><b>{{r.caption}}</b><small>{{r.house}} · {{r.event_name}}</small><small>Uploaded by {{r.uploaded_by}}</small></div>{% endfor %}</div>
-{% endblock %}
